@@ -8,6 +8,9 @@
 
 #include "../JuceLibraryCode/JuceHeader.h"
 
+#include <thread>
+#include <mutex>
+
 #include "DataModel.h"
 #include "ScaleComponent.h"
 #include "AudioFileLoader.h"
@@ -29,7 +32,7 @@ public:
 		pixelsToSeconds.setTextBoxStyle(Slider::TextEntryBoxPosition::TextBoxRight, true, 80, 20);
 		pixelsToSeconds.setRange(2.0f, 12000.0f);
 		pixelsToSeconds.setTextValueSuffix("px/s");
-		pixelsToSeconds.setValue(10.0f);
+		pixelsToSeconds.setValue(100.0f);
 		pixelsToSeconds.addListener(this);
 
 		addAndMakeVisible(scaleComponent);
@@ -37,12 +40,14 @@ public:
 		addAndMakeVisible(generateWaveform = new TextButton("Generate"));
 		generateWaveform->addListener(this);
 
+		addAndMakeVisible(playButton = new TextButton("Play"));
+		playButton->setClickingTogglesState(true);
+
 		addAndMakeVisible(samplePositionLabel);
 
         setSize (800, 600);
         setAudioChannels (2, 2);
 		startTimer(2);
-
     }
 
     ~MainContentComponent()
@@ -74,7 +79,43 @@ public:
         bufferToFill.clearActiveBufferRegion();
 		samplePosition += bufferToFill.numSamples;
 		
+		if (!playButton->getToggleState()) return;
+
+
+		if (mySpecialBuffer != nullptr) {
+			std::lock_guard<std::mutex> lock(g_i_mutex);
+
+			const int numInputChannels = mySpecialBuffer->getNumChannels();
+			const int numOutputChannels = bufferToFill.buffer->getNumChannels();
+
+			int outputSamplesRemaining = bufferToFill.numSamples;                                   // [8]
+			int outputSamplesOffset = bufferToFill.startSample;                                     // [9]
+
+			while (outputSamplesRemaining > 0)
+			{
+				int bufferSamplesRemaining = mySpecialBuffer->getNumSamples() - position;                 // [10]
+				int samplesThisTime = jmin(outputSamplesRemaining, bufferSamplesRemaining);        // [11]
+
+				if (samplesThisTime < 0) continue;
+
+				for (int channel = 0; channel < numOutputChannels; ++channel)
+				{
+					bufferToFill.buffer->copyFrom(channel, outputSamplesOffset,
+						*mySpecialBuffer, channel % numInputChannels,
+						position, samplesThisTime);
+				}
+
+				outputSamplesRemaining -= samplesThisTime;
+				outputSamplesOffset += samplesThisTime;
+				position += samplesThisTime;
+
+				if (position == mySpecialBuffer->getNumSamples())
+					position = 0;
+			}
+		}
     }
+
+	std::mutex g_i_mutex;
 
     void releaseResources() override
     {
@@ -130,6 +171,7 @@ public:
 		pixelsToSeconds.setBounds(row);
 
 		saveGenerated->setBounds(getLocalBounds().removeFromTop(20).removeFromRight(100).translated(0,20));
+		playButton->setBounds(getLocalBounds().removeFromBottom(20).removeFromRight(100).translated(0, -20));
 
 		scaleComponent.setBounds(getLocalBounds().removeFromTop(20));
     }
@@ -157,23 +199,28 @@ public:
 			if ((start + len) > max) { max = (start + len); }
 		}
 		int length = max - min;
-		
-		specialBufferThumbnail = loader.createThumbnail();
+		;
+		if(specialBufferThumbnail == nullptr) specialBufferThumbnail = loader.createThumbnail();
 		specialBufferThumbnail->reset(2, sr);
-
-		mySpecialBuffer = new AudioSampleBuffer(2, length);
-		mySpecialBuffer->clear();
-
+		
+		ScopedPointer<AudioSampleBuffer> workbuffer = new AudioSampleBuffer(2, length);
+		workbuffer->clear();
+		
 		for (auto s : samples) {
 			auto startPos = static_cast<int>(s->getSampleStartPosition() - min);
 			for (int i = 0; i < s->getNumChannels(); ++i) {
-				mySpecialBuffer->addFrom(i, startPos,
+				workbuffer->addFrom(i, startPos,
 					s->getSource(), i, 0,
 					s->getSampleLength());
 			}
 			
 		}
-		specialBufferThumbnail->addBlock(0, *mySpecialBuffer, 0, mySpecialBuffer->getNumSamples());
+		specialBufferThumbnail->addBlock(0, *workbuffer, 0, workbuffer->getNumSamples());
+
+		{
+			std::lock_guard<std::mutex> lock(g_i_mutex);
+			mySpecialBuffer = workbuffer.release();
+		}
 	}
 
 	void openButtonClicked()
@@ -220,12 +267,12 @@ private:
 	}
 
     //==============================================================================
-	ScopedPointer<TextButton> addSample, generateWaveform, saveGenerated;
+	ScopedPointer<TextButton> addSample, generateWaveform, saveGenerated, playButton;
 	OwnedArray<Sample> samples;
 	OwnedArray<MySample> sampleBuffers;
 
-
-
+	int position = 0;
+	
 	ScopedPointer<AudioSampleBuffer> mySpecialBuffer;
 	ScopedPointer<AudioThumbnail> specialBufferThumbnail;
 	

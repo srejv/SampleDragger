@@ -10,6 +10,12 @@
 
 #pragma once
 
+class FadeOverlayComponent : public Component {
+
+	double rampInTime = 0.0;
+	double rampOutTime = 0.0;
+};
+
 class Sample : public Component {
 public:
 	Sample() { setSize(140, 80); }
